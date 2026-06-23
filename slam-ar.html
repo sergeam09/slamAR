@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>SLAM AR - 8th Wall</title>
+
+  <!-- 8th Wall Engine Binary (SLAM incluido, sin API key) -->
+  <!-- Copyright Niantic Spatial - licencia binary-only, uso comercial permitido -->
+  <script src="https://cdn.jsdelivr.net/npm/@8thwall/engine-binary@1/dist/xr.js"
+          async crossorigin="anonymous"
+          data-preload-chunks="slam"></script>
+
+  <!-- A-Frame -->
+  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { width: 100vw; height: 100vh; overflow: hidden; background: #000; }
+
+    #loading {
+      position: fixed; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      background: #111; color: #fff;
+      font-family: sans-serif; z-index: 999;
+      gap: 16px;
+    }
+    .spinner {
+      width: 48px; height: 48px;
+      border: 4px solid #333;
+      border-top-color: #00e5ff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #loading p { font-size: 14px; color: #aaa; text-align: center; max-width: 280px; }
+
+    #ui {
+      position: fixed; bottom: 32px; left: 50%;
+      transform: translateX(-50%);
+      display: flex; gap: 12px;
+      z-index: 100;
+    }
+    .btn {
+      padding: 12px 20px;
+      border-radius: 50px;
+      border: none; cursor: pointer;
+      font-size: 14px; font-weight: bold;
+      backdrop-filter: blur(8px);
+      transition: transform 0.1s, opacity 0.2s;
+    }
+    .btn:active { transform: scale(0.95); }
+    #btn-place  { background: rgba(0,229,255,0.85); color: #000; }
+    #btn-clear  { background: rgba(255,60,60,0.75);  color: #fff; }
+    #btn-recenter { background: rgba(255,255,255,0.2); color: #fff; border: 1px solid rgba(255,255,255,0.4); }
+
+    #status {
+      position: fixed; top: 20px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.55);
+      color: #fff; font-family: sans-serif;
+      font-size: 13px; padding: 8px 18px;
+      border-radius: 20px;
+      backdrop-filter: blur(6px);
+      z-index: 100; text-align: center;
+      pointer-events: none;
+      transition: opacity 0.4s;
+    }
+
+    /* Crosshair central */
+    #crosshair {
+      position: fixed; top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      width: 36px; height: 36px;
+      z-index: 100; pointer-events: none;
+      opacity: 0.7;
+    }
+    #crosshair::before, #crosshair::after {
+      content: '';
+      position: absolute;
+      background: #00e5ff;
+      border-radius: 2px;
+    }
+    #crosshair::before { width: 2px; height: 100%; left: 50%; transform: translateX(-50%); }
+    #crosshair::after  { width: 100%; height: 2px; top: 50%; transform: translateY(-50%); }
+  </style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <strong>Iniciando SLAM AR…</strong>
+  <p>Apunta la cámara al suelo y mueve el teléfono lentamente para calibrar el espacio.</p>
+</div>
+
+<div id="status">Calibrando superficie…</div>
+<div id="crosshair"></div>
+
+<div id="ui">
+  <button class="btn" id="btn-recenter">↺ Recentrar</button>
+  <button class="btn" id="btn-place">＋ Colocar objeto</button>
+  <button class="btn" id="btn-clear">✕ Borrar todo</button>
+</div>
+
+<a-scene
+  id="scene"
+  xr8-web-ar
+  xrweb="allowedDevices: any"
+  renderer="colorManagement: true; physicallyCorrectLights: true"
+  loading-screen="enabled: false"
+  vr-mode-ui="enabled: false"
+>
+  <a-camera id="camera" position="0 1.6 0" look-controls="enabled: false"></a-camera>
+
+  <!-- Luz ambiente -->
+  <a-light type="ambient" color="#ffffff" intensity="0.6"></a-light>
+  <a-light type="directional" position="1 3 2" intensity="0.8"></a-light>
+
+  <!-- Contenedor donde se añaden los objetos anclados -->
+  <a-entity id="world-root"></a-entity>
+
+</a-scene>
+
+<script>
+// Copyright Niantic Spatial — 8th Wall Engine Binary
+// https://github.com/8thwall/engine
+
+const loading   = document.getElementById('loading')
+const statusEl  = document.getElementById('status')
+const worldRoot = document.getElementById('world-root')
+const camera    = document.getElementById('camera')
+
+let slamReady = false
+let objectCount = 0
+
+// Colores para los objetos colocados
+const COLORS = ['#00e5ff','#ff6b6b','#ffd93d','#6bcb77','#c77dff','#ff9f43']
+const SHAPES = ['a-box','a-sphere','a-cylinder','a-cone','a-torus']
+
+// ──────────────────────────────────────────────
+// Esperar a que XR8 esté disponible
+// ──────────────────────────────────────────────
+function waitForXR8(cb) {
+  if (typeof XR8 !== 'undefined') { cb(); return; }
+  const t = setInterval(() => {
+    if (typeof XR8 !== 'undefined') { clearInterval(t); cb(); }
+  }, 100)
+}
+
+waitForXR8(() => {
+  // Componente A-Frame que inicializa el SLAM
+  AFRAME.registerComponent('xr8-web-ar', {
+    init() {
+      const scene = this.el
+
+      XR8.addCameraPipelineModules([
+        XR8.GlTextureRenderer.pipelineModule(),
+        XR8.Threejs.pipelineModule(),
+        XR8.XrController.pipelineModule(),
+        XRExtras?.AlmostThere?.pipelineModule?.() ?? {},
+        XRExtras?.Loading?.pipelineModule?.() ?? {},
+      ].filter(m => m && m.name))
+
+      // Cuando el SLAM detecta superficie
+      scene.addEventListener('reality.projectwallclock', () => {})
+
+      XR8.XrController.configure({
+        disableWorldTracking: false,
+        imageTargets: [],
+      })
+
+      XR8.run({
+        canvas: document.querySelector('canvas.a-canvas') || document.createElement('canvas'),
+      })
+
+      scene.addEventListener('realityready', () => {
+        slamReady = true
+        loading.style.display = 'none'
+        setStatus('¡Listo! Apunta al suelo y toca "Colocar objeto"')
+        setTimeout(() => statusEl.style.opacity = '0', 3000)
+      })
+
+      scene.addEventListener('realityerror', (e) => {
+        setStatus('Error: ' + (e.detail?.message ?? 'no se pudo iniciar AR'))
+      })
+    }
+  })
+})
+
+// ──────────────────────────────────────────────
+// Fallback: detectar cuando la escena A-Frame
+// arranca (por si XR8 ya inició de otra forma)
+// ──────────────────────────────────────────────
+document.getElementById('scene').addEventListener('loaded', () => {
+  setTimeout(() => {
+    if (!slamReady) {
+      // Intento directo de arrancar XR8 si el componente no lo hizo
+      tryBootXR8()
+    }
+  }, 1500)
+})
+
+function tryBootXR8() {
+  if (typeof XR8 === 'undefined') {
+    setStatus('Motor SLAM no disponible — verifica conexión a internet')
+    return
+  }
+  try {
+    const canvas = document.querySelector('canvas.a-canvas')
+    if (!canvas) return
+
+    XR8.XrController.configure({ disableWorldTracking: false })
+    XR8.run({ canvas })
+
+    window.addEventListener('xr8:ready', () => {
+      slamReady = true
+      loading.style.display = 'none'
+      setStatus('¡SLAM activo! Toca el botón para colocar objetos')
+      setTimeout(() => { statusEl.style.opacity = '0' }, 3000)
+    })
+  } catch(e) {
+    console.warn('XR8 boot fallback error:', e)
+  }
+}
+
+// ──────────────────────────────────────────────
+// Colocar objeto anclado frente a la cámara
+// ──────────────────────────────────────────────
+function placeObject() {
+  objectCount++
+  const color = COLORS[objectCount % COLORS.length]
+  const shape = SHAPES[objectCount % SHAPES.length]
+
+  // Posición: 1.5m frente a la cámara, a nivel del suelo
+  const camEl   = document.getElementById('camera')
+  const camPos  = camEl.object3D.position
+  const camRot  = camEl.object3D.rotation
+
+  // Calcular punto frente a la cámara en el plano horizontal
+  const dist = 1.5
+  const angle = camRot.y
+  const x = camPos.x - Math.sin(angle) * dist
+  const z = camPos.z - Math.cos(angle) * dist
+  const y = 0.0  // anclado al suelo
+
+  const el = document.createElement(shape)
+  el.setAttribute('position', `${x.toFixed(3)} ${y} ${z.toFixed(3)}`)
+  el.setAttribute('color', color)
+  el.setAttribute('scale', '0.25 0.25 0.25')
+  el.setAttribute('shadow', '')
+
+  // Animación de aparición
+  el.setAttribute('animation__scale', {
+    property: 'scale',
+    from: '0 0 0',
+    to: '0.25 0.25 0.25',
+    dur: 300,
+    easing: 'easeOutBack',
+  })
+
+  // Rotación suave perpetua
+  el.setAttribute('animation__rot', {
+    property: 'rotation',
+    to: '0 360 0',
+    loop: true,
+    dur: 4000,
+    easing: 'linear',
+  })
+
+  worldRoot.appendChild(el)
+  setStatus(`Objeto #${objectCount} colocado`)
+  setTimeout(() => { statusEl.style.opacity = '0' }, 2000)
+}
+
+// ──────────────────────────────────────────────
+// Botones
+// ──────────────────────────────────────────────
+document.getElementById('btn-place').addEventListener('click', placeObject)
+
+document.getElementById('btn-clear').addEventListener('click', () => {
+  while (worldRoot.firstChild) worldRoot.removeChild(worldRoot.firstChild)
+  objectCount = 0
+  setStatus('Objetos eliminados')
+  setTimeout(() => { statusEl.style.opacity = '0' }, 2000)
+})
+
+document.getElementById('btn-recenter').addEventListener('click', () => {
+  if (typeof XR8 !== 'undefined' && XR8.XrController) {
+    XR8.XrController.recenter()
+    setStatus('Espacio recentrado')
+    setTimeout(() => { statusEl.style.opacity = '0' }, 2000)
+  }
+})
+
+// También colocar objeto al tocar la pantalla (fuera de los botones)
+document.getElementById('scene').addEventListener('click', (e) => {
+  if (e.target.closest('#ui')) return
+  placeObject()
+})
+
+function setStatus(msg) {
+  statusEl.textContent = msg
+  statusEl.style.opacity = '1'
+}
+</script>
+</body>
+</html>
