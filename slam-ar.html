@@ -169,51 +169,20 @@ function clearObjects() {
 window.addEventListener('xrloaded', () => {
   log('xrloaded OK')
 
-  try {
-    log('GlTextureRenderer: ' + (typeof XR8.GlTextureRenderer))
-    log('Threejs: ' + (typeof XR8.Threejs))
-    log('XrController: ' + (typeof XR8.XrController))
-  } catch(e) { log('CHECK ERR: ' + e.message) }
-
   XR8.addCameraPipelineModules([
     XR8.GlTextureRenderer.pipelineModule(),
-    XR8.Threejs.pipelineModule(),
-    XR8.XrController.pipelineModule(),
     {
-      name: 'slam-app',
+      name: 'slam-test',
       onStart() {
-        log('onStart OK')
-        const s = XR8.Threejs.xrScene()
-        xrScene  = s.scene
-        xrCamera = s.camera
-
-        const THREE = window.THREE
-        xrScene.add(new THREE.AmbientLight(0xffffff, 0.8))
-        const dir = new THREE.DirectionalLight(0xffffff, 0.6)
-        dir.position.set(2, 4, 2)
-        xrScene.add(dir)
-
-        setTimeout(showUI, 2500)
+        log('onStart OK — camara corriendo')
+        showUI()
       },
       onUpdate() {
-        // Rotar objetos colocados
-        placed.forEach(m => {
-          m.rotation.y += 0.01 * m.userData.rotSpeed
-        })
       },
     }
   ])
 
-  XR8.XrController.configure({ disableWorldTracking: false })
   XR8.run({ canvas })
-})
-
-// Botones
-document.getElementById('btn-place').addEventListener('click', placeObject)
-document.getElementById('btn-clear').addEventListener('click', clearObjects)
-document.getElementById('btn-recenter').addEventListener('click', () => {
-  XR8.XrController.recenter()
-  setStatus('Recentrado', 2000)
 })
 
 // Tap en pantalla también coloca
