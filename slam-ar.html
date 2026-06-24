@@ -11,7 +11,7 @@
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     html, body { width:100%; height:100%; overflow:hidden; background:#000; font-family:sans-serif; }
-    #camerafeed { position:fixed; top:0; left:0; width:100% !important; height:100% !important; display:block; z-index:0; }
+    #camerafeed { position:fixed; top:0; left:0; width:100%!important; height:100%!important; display:block; z-index:0; }
     #status {
       position:fixed; top:16px; left:50%; transform:translateX(-50%);
       background:rgba(0,0,0,0.7); color:#fff; font-size:12px;
@@ -43,13 +43,11 @@
 </head>
 <body>
 <canvas id="camerafeed"></canvas>
-
 <div id="overlay">
   <div class="spinner"></div>
   <strong>Calibrando SLAM…</strong>
-  <p>Mueve el teléfono lentamente apuntando al suelo para mapear el espacio.</p>
+  <p>Mueve el teléfono lentamente apuntando al suelo.</p>
 </div>
-
 <div id="status">Cargando…</div>
 <div id="crosshair"></div>
 <div id="ui">
@@ -59,10 +57,10 @@
 </div>
 
 <script>
-const canvas    = document.getElementById('camerafeed')
-const overlay   = document.getElementById('overlay')
-const statusEl  = document.getElementById('status')
-const ui        = document.getElementById('ui')
+const canvas   = document.getElementById('camerafeed')
+const overlay  = document.getElementById('overlay')
+const statusEl = document.getElementById('status')
+const ui       = document.getElementById('ui')
 const crosshair = document.getElementById('crosshair')
 
 canvas.width  = window.innerWidth
@@ -72,73 +70,51 @@ window.addEventListener('resize', () => {
   canvas.height = window.innerHeight
 })
 
-let scene, camera
-let initialY = null   // Y de la cámara cuando arrancó XR8
-let groundY  = null   // Y estimado del suelo = initialY - altura del usuario (~1.5m)
+// ── Escena propia separada de XR8 ────────────────────────────────────────
+// XR8 mueve su escena interna. Nosotros tenemos UNA escena separada
+// y la renderizamos manualmente usando el pose real de la cámara.
+const arScene    = new THREE.Scene()
+const arCamera   = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 1000)
+let   arRenderer = null
+
+arScene.add(new THREE.AmbientLight(0xffffff, 0.7))
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8)
+dirLight.position.set(1, 3, 2)
+arScene.add(dirLight)
+
 let count = 0
 const placed = []
 const COLORS = [0x00e5ff, 0xff6b6b, 0xffd93d, 0x6bcb77, 0xc77dff, 0xff9f43]
 
-function setStatus(msg) {
-  statusEl.textContent = msg
-  statusEl.style.opacity = '1'
-}
+function setStatus(msg) { statusEl.textContent = msg }
 
 function showUI() {
   overlay.style.opacity = '0'
   setTimeout(() => { overlay.style.display = 'none' }, 500)
   ui.style.display        = 'flex'
   crosshair.style.display = 'block'
+  setStatus('Apunta al suelo y toca Colocar')
 }
 
 function placeObject(clientX, clientY) {
-  if (!scene || !camera) return
-
-  // Intentar XR8.hitTest primero
+  // Usar hitTest de XR8 para obtener posición en el mundo real
   const nx = clientX / window.innerWidth
   const ny = clientY / window.innerHeight
   const hits = XR8.XrController.hitTest(nx, ny, ['FEATURE_POINT', 'ESTIMATED_SURFACE'])
 
-  let pos
-
+  let worldPos
   if (hits && hits.length > 0) {
-    // Usar el hit más cercano
     const h = hits[0]
-    pos = new THREE.Vector3(h.position.x, h.position.y, h.position.z)
-    setStatus(`Objeto #${count+1} en FEATURE_POINT`)
+    worldPos = new THREE.Vector3(h.position.x, h.position.y, h.position.z)
   } else {
-    // Fallback: raycaster hacia adelante de la cámara hasta el plano del suelo estimado
-    const camPos  = new THREE.Vector3()
-    const camQuat = new THREE.Quaternion()
-    camera.getWorldPosition(camPos)
-    camera.getWorldQuaternion(camQuat)
-
-    // El suelo está a initialY - 1.5m (altura típica sosteniendo el teléfono)
-    const estimatedGround = groundY !== null ? groundY : camPos.y - 1.5
-
-    // Calcular punto 1.2m frente a la cámara proyectado al suelo estimado
-    const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camQuat)
-    // Intersección del rayo con el plano horizontal del suelo
-    if (Math.abs(dir.y) > 0.001) {
-      const t = (estimatedGround - camPos.y) / dir.y
-      if (t > 0) {
-        pos = new THREE.Vector3(
-          camPos.x + dir.x * t,
-          estimatedGround,
-          camPos.z + dir.z * t
-        )
-      }
-    }
-    if (!pos) {
-      // último fallback: 1.2m al frente en el plano horizontal
-      dir.y = 0; dir.normalize()
-      pos = new THREE.Vector3(
-        camPos.x + dir.x * 1.2,
-        estimatedGround,
-        camPos.z + dir.z * 1.2
-      )
-    }
-    setStatus(`Objeto #${count+1} (estimado, mueve más el teléfono)`)
+    // Fallback: 1.2m frente a la cámara en el plano horizontal
+    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(arCamera.quaternion)
+    fwd.y = 0; fwd.normalize().multiplyScalar(1.2)
+    worldPos = new THREE.Vector3(
+      arCamera.position.x + fwd.x,
+      arCamera.position.y - 1.0,
+      arCamera.position.z + fwd.z
+    )
   }
 
   const geos = [
@@ -148,66 +124,81 @@ function placeObject(clientX, clientY) {
     new THREE.ConeGeometry(0.08, 0.16, 16),
     new THREE.TorusGeometry(0.07, 0.025, 12, 24),
   ]
-  const mat = new THREE.MeshStandardMaterial({
-    color: COLORS[count % COLORS.length], roughness: 0.3, metalness: 0.2,
-  })
+  const mat = new THREE.MeshStandardMaterial({ color: COLORS[count % COLORS.length], roughness: 0.3 })
   const mesh = new THREE.Mesh(geos[count % geos.length], mat)
-  mesh.position.copy(pos)
+  mesh.position.copy(worldPos)
   mesh.position.y += 0.06
   mesh.userData.rotSpeed = 0.4 + Math.random() * 0.6
 
-  scene.add(mesh)
+  arScene.add(mesh)
   placed.push(mesh)
   count++
+  setStatus(`Objeto #${count} colocado`)
 }
 
 function clearObjects() {
-  placed.forEach(m => scene && scene.remove(m))
+  placed.forEach(m => arScene.remove(m))
   placed.length = 0; count = 0
   setStatus('Escena limpia')
 }
 
 const onxrloaded = () => {
   XR8.addCameraPipelineModules([
-    XR8.GlTextureRenderer.pipelineModule(),
-    XR8.Threejs.pipelineModule(),
-    XR8.XrController.pipelineModule(),
+    XR8.GlTextureRenderer.pipelineModule(),  // feed de cámara
+    XR8.XrController.pipelineModule(),        // SLAM — solo tracking, sin Three.js
     {
       name: 'slam-app',
-      onStart() {
-        const s = XR8.Threejs.xrScene()
-        scene  = s.scene
-        camera = s.camera
 
+      onStart({ canvas: c, GLctx }) {
+        // Crear renderer propio usando el contexto WebGL de XR8
+        arRenderer = new THREE.WebGLRenderer({
+          canvas: c,
+          context: GLctx,
+          alpha: true,
+          antialias: true,
+        })
+        arRenderer.autoClear    = false  // XR8 ya limpia el canvas con el feed de cámara
+        arRenderer.setPixelRatio(window.devicePixelRatio)
+        arRenderer.setSize(window.innerWidth, window.innerHeight)
+
+        arCamera.aspect = window.innerWidth / window.innerHeight
+        arCamera.updateProjectionMatrix()
+
+        // Inicializar proyección con el pose inicial
         XR8.XrController.updateCameraProjectionMatrix({
-          origin: camera.position,
-          facing: camera.quaternion,
+          origin: { x: 0, y: 0, z: 0 },
+          facing: { x: 0, y: 0, z: 0, w: 1 },
         })
 
-        scene.add(new THREE.AmbientLight(0xffffff, 0.7))
-        const dir = new THREE.DirectionalLight(0xffffff, 0.8)
-        dir.position.set(1, 3, 2)
-        scene.add(dir)
-
         showUI()
-        setStatus('Apunta al suelo y mueve el teléfono')
       },
 
       onUpdate({ processCpuResult }) {
-        // Capturar Y inicial de la cámara para estimar el suelo
-        if (initialY === null && camera) {
-          initialY = camera.position.y
-          groundY  = initialY - 1.5
+        if (!processCpuResult?.reality) return
+        const { position, rotation, intrinsics } = processCpuResult.reality
+        if (!position || !rotation) return
+
+        // Aplicar pose SLAM directamente a nuestra cámara
+        arCamera.position.set(position.x, position.y, position.z)
+        arCamera.quaternion.set(rotation.x, rotation.y, rotation.z, rotation.w)
+
+        // Actualizar FOV desde intrínsecos de la cámara real
+        if (intrinsics) {
+          for (let i = 0; i < 16; i++) {
+            arCamera.projectionMatrix.elements[i] = intrinsics[i]
+          }
+          arCamera.projectionMatrixInverse.copy(arCamera.projectionMatrix).invert()
         }
 
-        // Si XR8 reporta reality.position, refinar el suelo
-        if (processCpuResult?.reality?.position && initialY !== null) {
-          const ry = processCpuResult.reality.position.y
-          // El suelo está ~1.5m debajo de la cámara cuando la sostienes
-          groundY = ry - 1.5
-        }
-
+        // Rotar objetos
         placed.forEach(m => { m.rotation.y += 0.008 * m.userData.rotSpeed })
+      },
+
+      onRender() {
+        // Renderizar nuestra escena encima del feed de cámara
+        if (arRenderer) {
+          arRenderer.render(arScene, arCamera)
+        }
       },
     }
   ])
@@ -228,8 +219,7 @@ document.getElementById('btn-place').addEventListener('click', () =>
 document.getElementById('btn-clear').addEventListener('click', clearObjects)
 document.getElementById('btn-recenter').addEventListener('click', () => {
   XR8.XrController.recenter()
-  initialY = null; groundY = null
-  setStatus('Recentrado — apunta al suelo')
+  setStatus('Recentrado')
 })
 
 window.onerror = (msg, src, line) => setStatus(`ERR: ${msg} L${line}`)
