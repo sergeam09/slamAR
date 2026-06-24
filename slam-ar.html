@@ -4,25 +4,30 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
   <title>SLAM AR</title>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
-  <!-- Copyright Niantic Spatial — binary-only license -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.min.js"></script>
+  <!-- Copyright Niantic Spatial — binary-only license, commercial use permitted -->
   <script src="https://cdn.jsdelivr.net/npm/@8thwall/engine-binary@1/dist/xr.js"
-          async crossorigin="anonymous"
+          crossorigin="anonymous"
           data-preload-chunks="slam"></script>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
-    body { width:100vw; height:100vh; overflow:hidden; background:#000; font-family:sans-serif; }
+    html, body { width:100%; height:100%; overflow:hidden; background:#000; font-family:sans-serif; }
+
+    /* Canvas ocupa toda la pantalla */
+    canvas {
+      position:fixed !important;
+      top:0 !important; left:0 !important;
+      width:100vw !important; height:100vh !important;
+      display:block;
+    }
 
     #overlay {
-      position:fixed; inset:0;
-      display:flex; flex-direction:column;
+      position:fixed; inset:0; display:flex; flex-direction:column;
       align-items:center; justify-content:center;
-      background:#111; color:#fff; z-index:10; gap:14px;
-      transition:opacity 0.5s;
+      background:#111; color:#fff; z-index:10; gap:14px; transition:opacity 0.5s;
     }
     .spinner {
-      width:48px; height:48px;
-      border:4px solid #333; border-top-color:#00e5ff;
+      width:48px; height:48px; border:4px solid #333; border-top-color:#00e5ff;
       border-radius:50%; animation:spin 0.8s linear infinite;
     }
     @keyframes spin { to { transform:rotate(360deg); } }
@@ -32,19 +37,8 @@
       position:fixed; top:20px; left:50%; transform:translateX(-50%);
       background:rgba(0,0,0,0.6); color:#fff; font-size:13px;
       padding:8px 18px; border-radius:20px; z-index:20;
-      pointer-events:none; white-space:nowrap; transition:opacity 0.4s;
+      pointer-events:none; transition:opacity 0.4s; white-space:nowrap;
     }
-
-    #crosshair {
-      position:fixed; top:50%; left:50%;
-      transform:translate(-50%,-50%);
-      width:32px; height:32px; z-index:20; pointer-events:none; opacity:0.5;
-    }
-    #crosshair::before,#crosshair::after {
-      content:''; position:absolute; background:#00e5ff; border-radius:2px;
-    }
-    #crosshair::before { width:2px; height:100%; left:50%; transform:translateX(-50%); }
-    #crosshair::after  { width:100%; height:2px; top:50%; transform:translateY(-50%); }
 
     #ui {
       position:fixed; bottom:36px; left:50%; transform:translateX(-50%);
@@ -56,53 +50,36 @@
       backdrop-filter:blur(8px); transition:transform 0.1s;
     }
     .btn:active { transform:scale(0.93); }
-    #btn-place   { background:rgba(0,229,255,0.9); color:#000; }
-    #btn-clear   { background:rgba(255,60,60,0.8); color:#fff; }
-    #btn-recenter{ background:rgba(255,255,255,0.2); color:#fff; border:1px solid rgba(255,255,255,0.3); }
-
-    #canvas {
-      position:fixed; top:0; left:0;
-      width:100%; height:100%;
-      display:block;
-    }
+    #btn-place    { background:rgba(0,229,255,0.9); color:#000; }
+    #btn-clear    { background:rgba(255,60,60,0.8); color:#fff; }
+    #btn-recenter { background:rgba(255,255,255,0.2); color:#fff; border:1px solid rgba(255,255,255,0.3); }
   </style>
 </head>
 <body>
 
 <div id="overlay">
   <div class="spinner"></div>
-  <strong>Iniciando SLAM…</strong>
-  <p>Mueve el teléfono lentamente apuntando al suelo para calibrar el espacio.</p>
+  <strong>Calibrando espacio…</strong>
+  <p>Mueve el teléfono lentamente apuntando al suelo para que el SLAM detecte la superficie.</p>
 </div>
 
-<div id="status">Calibrando…</div>
-<div id="crosshair"></div>
+<div id="status">Cargando…</div>
+
 <div id="ui">
   <button class="btn" id="btn-recenter">↺ Recentrar</button>
   <button class="btn" id="btn-place">＋ Colocar</button>
   <button class="btn" id="btn-clear">✕ Borrar</button>
 </div>
 
-<canvas id="canvas"></canvas>
-
 <script>
 const overlay  = document.getElementById('overlay')
 const statusEl = document.getElementById('status')
 const ui       = document.getElementById('ui')
-const canvas   = document.getElementById('canvas')
 
-let xrScene, xrCamera, count = 0
+let xrScene, xrCamera
+let count = 0
 const placed = []
-
 const COLORS = [0x00e5ff, 0xff6b6b, 0xffd93d, 0x6bcb77, 0xc77dff, 0xff9f43]
-
-const log = (msg) => {
-  console.log(msg)
-  statusEl.style.opacity = '1'
-  statusEl.textContent = msg
-}
-window.onerror = (msg, src, line) => log(`ERROR: ${msg} (${line})`)
-window.addEventListener('unhandledrejection', e => log(`PROMISE ERR: ${e.reason}`))
 
 function setStatus(msg, fade) {
   statusEl.textContent = msg
@@ -114,47 +91,47 @@ function showUI() {
   overlay.style.opacity = '0'
   setTimeout(() => { overlay.style.display = 'none' }, 500)
   ui.style.display = 'flex'
-  setStatus('¡Listo! Toca el botón para colocar objetos', 3000)
+  setStatus('¡Listo! Apunta al suelo y toca Colocar', 3000)
 }
 
-function makeShape(index) {
-  const THREE = window.THREE
-  if (!THREE) return null
-  const geo = [
+function placeObject() {
+  if (!xrScene || !xrCamera) { setStatus('Calibrando aún…', 1500); return }
+
+  const geos = [
     new THREE.BoxGeometry(0.2, 0.2, 0.2),
     new THREE.SphereGeometry(0.13, 16, 16),
     new THREE.CylinderGeometry(0.08, 0.08, 0.24, 16),
     new THREE.ConeGeometry(0.13, 0.26, 16),
     new THREE.TorusGeometry(0.1, 0.04, 12, 24),
-  ][index % 5]
-  const mat = new THREE.MeshStandardMaterial({ color: COLORS[index % COLORS.length] })
-  return new THREE.Mesh(geo, mat)
-}
+  ]
 
-function placeObject() {
-  if (!xrScene || !xrCamera) { setStatus('SLAM aún no listo', 2000); return }
+  const geo = geos[count % geos.length]
+  const mat = new THREE.MeshStandardMaterial({
+    color: COLORS[count % COLORS.length],
+    roughness: 0.4, metalness: 0.1,
+  })
+  const mesh = new THREE.Mesh(geo, mat)
 
-  const THREE = window.THREE
-  const mesh = makeShape(count)
-  if (!mesh) return
+  const camWorldPos  = new THREE.Vector3()
+  const camWorldQuat = new THREE.Quaternion()
+  xrCamera.getWorldPosition(camWorldPos)
+  xrCamera.getWorldQuaternion(camWorldQuat)
 
-  const dir = new THREE.Vector3(0, 0, -1)
-    .applyQuaternion(xrCamera.quaternion)
-  dir.y = 0
-  dir.normalize()
+  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camWorldQuat)
+  forward.y = 0
+  forward.normalize().multiplyScalar(1.2)
 
   mesh.position.set(
-    xrCamera.position.x + dir.x * 1.5,
-    0.1,
-    xrCamera.position.z + dir.z * 1.5
+    camWorldPos.x + forward.x,
+    camWorldPos.y - 0.5,
+    camWorldPos.z + forward.z
   )
+  mesh.userData.rotSpeed = 0.4 + Math.random() * 0.6
 
-  mesh.userData.rotSpeed = 0.5 + Math.random() * 0.8
   xrScene.add(mesh)
   placed.push(mesh)
   count++
-
-  setStatus(`Objeto #${count} colocado`, 2000)
+  setStatus(`Objeto #${count} anclado`, 2000)
 }
 
 function clearObjects() {
@@ -165,63 +142,66 @@ function clearObjects() {
 }
 
 window.addEventListener('xrloaded', () => {
-  log('xrloaded OK')
+  setStatus('XR8 listo…')
 
-  const THREE = window.THREE
+  // Crear canvas con dimensiones explícitas ANTES de pasarlo a XR8
+  const canvas = document.createElement('canvas')
+  canvas.width  = window.innerWidth  * window.devicePixelRatio
+  canvas.height = window.innerHeight * window.devicePixelRatio
+  canvas.style.cssText = `
+    position:fixed; top:0; left:0;
+    width:100vw; height:100vh;
+    display:block; z-index:0;
+  `
+  document.body.appendChild(canvas)
 
-  const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true })
-  renderer.setPixelRatio(window.devicePixelRatio)
-  renderer.setSize(window.innerWidth, window.innerHeight)
-
-  const scene = new THREE.Scene()
-  const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 1000)
-  scene.add(camera)
-
-  scene.add(new THREE.AmbientLight(0xffffff, 0.8))
-  const dirLight = new THREE.DirectionalLight(0xffffff, 0.6)
-  dirLight.position.set(2, 4, 2)
-  scene.add(dirLight)
-
-  xrScene = scene
-  xrCamera = camera
+  // Click en canvas coloca objeto
+  canvas.addEventListener('click', placeObject)
 
   XR8.addCameraPipelineModules([
     XR8.GlTextureRenderer.pipelineModule(),
+    XR8.Threejs.pipelineModule(),
     XR8.XrController.pipelineModule(),
     {
       name: 'slam-app',
       onStart() {
-        log('onStart OK')
+        const s = XR8.Threejs.xrScene()
+        xrScene  = s.scene
+        xrCamera = s.camera
+
+        xrScene.add(new THREE.AmbientLight(0xffffff, 0.7))
+        const dir = new THREE.DirectionalLight(0xffffff, 0.8)
+        dir.position.set(1, 3, 2)
+        xrScene.add(dir)
+
         showUI()
       },
-      onUpdate({ processCpuResult }) {
-        if (!processCpuResult?.reality) return
-        const { rotation, position, intrinsics } = processCpuResult.reality
-        if (rotation) camera.quaternion.set(rotation.x, rotation.y, rotation.z, rotation.w)
-        if (position) camera.position.set(position.x, position.y, position.z)
-        if (intrinsics) {
-          const { fovX } = intrinsics
-          if (fovX) camera.fov = fovX * (180 / Math.PI)
-          camera.updateProjectionMatrix()
-        }
-        placed.forEach(m => { m.rotation.y += 0.01 * m.userData.rotSpeed })
-        renderer.render(scene, camera)
+      onUpdate() {
+        placed.forEach(m => { m.rotation.y += 0.008 * m.userData.rotSpeed })
       },
     }
   ])
 
   XR8.XrController.configure({ disableWorldTracking: false })
   XR8.run({ canvas })
+
+  // Asegurar tamaño correcto en resize
+  window.addEventListener('resize', () => {
+    canvas.width  = window.innerWidth  * window.devicePixelRatio
+    canvas.height = window.innerHeight * window.devicePixelRatio
+  })
 })
 
-document.getElementById('btn-place').addEventListener('click', placeObject)
-document.getElementById('btn-clear').addEventListener('click', clearObjects)
-document.getElementById('btn-recenter').addEventListener('click', () => {
-  if (window.XR8) XR8.XrController.recenter()
+document.getElementById('btn-place').addEventListener('click',    e => { e.stopPropagation(); placeObject() })
+document.getElementById('btn-clear').addEventListener('click',    e => { e.stopPropagation(); clearObjects() })
+document.getElementById('btn-recenter').addEventListener('click', e => {
+  e.stopPropagation()
+  XR8.XrController.recenter()
   setStatus('Recentrado', 2000)
 })
 
-canvas.addEventListener('click', placeObject)
+window.onerror = (msg, src, line) => setStatus(`ERR: ${msg} L${line}`)
+window.addEventListener('unhandledrejection', e => setStatus(`ERR: ${e.reason}`))
 </script>
 </body>
 </html>
