@@ -4,6 +4,7 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
   <title>SLAM AR</title>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
   <!-- Copyright Niantic Spatial — binary-only license -->
   <script src="https://cdn.jsdelivr.net/npm/@8thwall/engine-binary@1/dist/xr.js"
           async crossorigin="anonymous"
@@ -93,7 +94,8 @@ const canvas   = document.getElementById('canvas')
 let xrScene, xrCamera, count = 0
 const placed = []
 
-// Log visible en pantalla para depurar en móvil
+const COLORS = [0x00e5ff, 0xff6b6b, 0xffd93d, 0x6bcb77, 0xc77dff, 0xff9f43]
+
 const log = (msg) => {
   console.log(msg)
   statusEl.style.opacity = '1'
@@ -101,8 +103,6 @@ const log = (msg) => {
 }
 window.onerror = (msg, src, line) => log(`ERROR: ${msg} (${line})`)
 window.addEventListener('unhandledrejection', e => log(`PROMISE ERR: ${e.reason}`))
-
-const COLORS = [0x00e5ff, 0xff6b6b, 0xffd93d, 0x6bcb77, 0xc77dff, 0xff9f43]
 
 function setStatus(msg, fade) {
   statusEl.textContent = msg
@@ -138,7 +138,6 @@ function placeObject() {
   const mesh = makeShape(count)
   if (!mesh) return
 
-  // Posición: 1.5m frente a la cámara, en Y=0 (suelo)
   const dir = new THREE.Vector3(0, 0, -1)
     .applyQuaternion(xrCamera.quaternion)
   dir.y = 0
@@ -165,27 +164,63 @@ function clearObjects() {
   setStatus('Escena limpia', 2000)
 }
 
-// Esperar a que XR8 esté listo
 window.addEventListener('xrloaded', () => {
   log('xrloaded OK')
 
+  const THREE = window.THREE
+
+  const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true })
+  renderer.setPixelRatio(window.devicePixelRatio)
+  renderer.setSize(window.innerWidth, window.innerHeight)
+
+  const scene = new THREE.Scene()
+  const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 1000)
+  scene.add(camera)
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.8))
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.6)
+  dirLight.position.set(2, 4, 2)
+  scene.add(dirLight)
+
+  xrScene = scene
+  xrCamera = camera
+
   XR8.addCameraPipelineModules([
     XR8.GlTextureRenderer.pipelineModule(),
+    XR8.XrController.pipelineModule(),
     {
-      name: 'slam-test',
+      name: 'slam-app',
       onStart() {
-        log('onStart OK — camara corriendo')
+        log('onStart OK')
         showUI()
       },
-      onUpdate() {
+      onUpdate({ processCpuResult }) {
+        if (!processCpuResult?.reality) return
+        const { rotation, position, intrinsics } = processCpuResult.reality
+        if (rotation) camera.quaternion.set(rotation.x, rotation.y, rotation.z, rotation.w)
+        if (position) camera.position.set(position.x, position.y, position.z)
+        if (intrinsics) {
+          const { fovX } = intrinsics
+          if (fovX) camera.fov = fovX * (180 / Math.PI)
+          camera.updateProjectionMatrix()
+        }
+        placed.forEach(m => { m.rotation.y += 0.01 * m.userData.rotSpeed })
+        renderer.render(scene, camera)
       },
     }
   ])
 
+  XR8.XrController.configure({ disableWorldTracking: false })
   XR8.run({ canvas })
 })
 
-// Tap en pantalla también coloca
+document.getElementById('btn-place').addEventListener('click', placeObject)
+document.getElementById('btn-clear').addEventListener('click', clearObjects)
+document.getElementById('btn-recenter').addEventListener('click', () => {
+  if (window.XR8) XR8.XrController.recenter()
+  setStatus('Recentrado', 2000)
+})
+
 canvas.addEventListener('click', placeObject)
 </script>
 </body>
