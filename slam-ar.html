@@ -29,20 +29,9 @@
     @keyframes spin { to { transform:rotate(360deg); } }
     #overlay p { font-size:13px; color:#aaa; text-align:center; max-width:260px; line-height:1.6; }
 
-    /* Barra de progreso del mapa SLAM */
-    #slam-progress {
-      position:fixed; bottom:0; left:0; right:0; height:3px;
-      background:rgba(255,255,255,0.1); z-index:21; display:none;
-    }
-    #slam-progress-bar {
-      height:100%; width:0%; background:#00e5ff;
-      transition:width 0.3s; border-radius:0 2px 2px 0;
-    }
-
     #ui { position:fixed; bottom:36px; left:50%; transform:translateX(-50%); display:none; gap:10px; z-index:20; }
-    .btn { padding:13px 22px; border-radius:50px; border:none; cursor:pointer; font-size:14px; font-weight:bold; backdrop-filter:blur(10px); transition:transform 0.1s, opacity 0.2s; }
+    .btn { padding:13px 22px; border-radius:50px; border:none; cursor:pointer; font-size:14px; font-weight:bold; backdrop-filter:blur(10px); transition:transform 0.1s; }
     .btn:active { transform:scale(0.93); }
-    .btn:disabled { opacity:0.35; cursor:not-allowed; }
     #btn-place    { background:rgba(0,229,255,0.9); color:#000; }
     #btn-clear    { background:rgba(255,60,60,0.8); color:#fff; }
     #btn-recenter { background:rgba(255,255,255,0.2); color:#fff; border:1px solid rgba(255,255,255,0.3); }
@@ -58,22 +47,18 @@
 </div>
 
 <div id="status">Cargando…</div>
-<div id="slam-progress"><div id="slam-progress-bar"></div></div>
 
 <div id="ui">
   <button class="btn" id="btn-recenter">↺ Recentrar</button>
-  <button class="btn" id="btn-place" disabled>Apuntando…</button>
+  <button class="btn" id="btn-place">＋ Colocar</button>
   <button class="btn" id="btn-clear">✕ Borrar</button>
 </div>
 
 <script>
-const canvas      = document.getElementById('camerafeed')
-const overlay     = document.getElementById('overlay')
-const statusEl    = document.getElementById('status')
-const ui          = document.getElementById('ui')
-const btnPlace    = document.getElementById('btn-place')
-const progressBar = document.getElementById('slam-progress-bar')
-const progressWrap= document.getElementById('slam-progress')
+const canvas   = document.getElementById('camerafeed')
+const overlay  = document.getElementById('overlay')
+const statusEl = document.getElementById('status')
+const ui       = document.getElementById('ui')
 
 canvas.width  = window.innerWidth
 canvas.height = window.innerHeight
@@ -84,85 +69,48 @@ window.addEventListener('resize', () => {
 
 // ─── Estado ────────────────────────────────────────────────────────────────
 let scene, camera
-let reticle       = null   // Cursor 3D que sigue al suelo detectado
-let worldMapReady = false  // XR8 onStart disparó — listo para hitTest
-let currentHit    = null   // Último hit {x,y,z,qx,qy,qz,qw} en coords mundo
+let surface  = null   // Plano invisible en Y=0 — el suelo del mundo SLAM
+let reticle  = null   // Cursor que muestra dónde va a caer el objeto
 let count = 0
-let frameCount = 0
-const placed = []
+const placed   = []
+const raycaster = new THREE.Raycaster()
+const tapPos    = new THREE.Vector2()
 const COLORS = [0x00e5ff, 0xff6b6b, 0xffd93d, 0x6bcb77, 0xc77dff, 0xff9f43]
 
-// ─── UI helpers ────────────────────────────────────────────────────────────
 function setStatus(msg) { statusEl.textContent = msg }
 
 function showUI() {
   overlay.style.opacity = '0'
   setTimeout(() => { overlay.style.display = 'none' }, 500)
-  ui.style.display  = 'flex'
-  progressWrap.style.display = 'block'
+  ui.style.display = 'flex'
 }
 
-// ─── Reticle (cursor en el suelo detectado) ────────────────────────────────
-function createReticle() {
-  const geo = new THREE.RingGeometry(0.08, 0.11, 32)
-  // El RingGeometry está en XY, rotarlo para que quede horizontal
-  geo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2))
-  const mat = new THREE.MeshBasicMaterial({
-    color: 0x00e5ff, side: THREE.DoubleSide, transparent: true, opacity: 0.85,
-  })
-  reticle = new THREE.Mesh(geo, mat)
-  reticle.visible = false
-
-  const dotGeo = new THREE.CircleGeometry(0.015, 16)
-  dotGeo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2))
-  reticle.add(new THREE.Mesh(dotGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide })))
-
-  scene.add(reticle)
+// ─── Raycast contra el plano del suelo ─────────────────────────────────────
+// El plano surface está fijo en Y=0. El raycaster es estable porque Y=0
+// no cambia con el mapa SLAM — solo la cámara se mueve.
+function getSurfaceHit(clientX, clientY) {
+  if (!surface) return null
+  tapPos.x =  (clientX / window.innerWidth)  * 2 - 1
+  tapPos.y = -(clientY / window.innerHeight) * 2 + 1
+  raycaster.setFromCamera(tapPos, camera)
+  const hits = raycaster.intersectObject(surface)
+  return hits.length > 0 ? hits[0].point : null
 }
 
-// ─── Actualizar reticle con hit test del centro de pantalla ────────────────
+// ─── Actualizar reticle cada frame ─────────────────────────────────────────
 function updateReticle() {
-  if (!worldMapReady) return
-
-  // Pedir primero planos (más estables), luego puntos como fallback visual
-  const hitsAll      = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE', 'FEATURE_POINT'])
-  const hitsSurface  = hitsAll?.filter(h => h.type === 'ESTIMATED_SURFACE') ?? []
-  const hitsAny      = hitsAll ?? []
-
-  // Para el reticle usamos cualquier hit (visual feedback)
-  const displayHit = hitsSurface[0] ?? hitsAny[0] ?? null
-
-  if (displayHit) {
-    const p = displayHit.position
-    const q = displayHit.rotation
-    reticle.position.set(p.x, p.y, p.z)
-    if (q) reticle.quaternion.set(q.x, q.y, q.z, q.w)
-
-    // Color: cian si es plano estable, naranja si solo FEATURE_POINT
-    reticle.material.color.setHex(hitsSurface.length > 0 ? 0x00e5ff : 0xff9f43)
+  const hit = getSurfaceHit(window.innerWidth / 2, window.innerHeight / 2)
+  if (hit && reticle) {
+    reticle.position.set(hit.x, hit.y, hit.z)
     reticle.visible = true
-  } else {
-    reticle.visible = false
-  }
-
-  // Solo permitir colocar si tenemos un plano detectado (ESTIMATED_SURFACE)
-  if (hitsSurface.length > 0) {
-    const h = hitsSurface[0]
-    const p = h.position
-    const q = h.rotation
-    currentHit = { x: p.x, y: p.y, z: p.z, qx: q?.x||0, qy: q?.y||0, qz: q?.z||0, qw: q?.w||1 }
-    btnPlace.textContent = '＋ Colocar'
-    btnPlace.disabled    = false
-  } else {
-    currentHit           = null
-    btnPlace.textContent = hitsAny.length > 0 ? 'Sigue escaneando…' : 'Apuntando…'
-    btnPlace.disabled    = true
   }
 }
 
-// ─── Colocar objeto en la posición anclada del hit test ───────────────────
-function placeObject() {
-  if (!scene || !currentHit) return
+// ─── Colocar objeto en la intersección del suelo ───────────────────────────
+function placeObject(clientX, clientY) {
+  if (!scene) return
+  const hit = getSurfaceHit(clientX, clientY)
+  if (!hit) return
 
   const geos = [
     new THREE.BoxGeometry(0.12, 0.12, 0.12),
@@ -176,25 +124,23 @@ function placeObject() {
   })
   const mesh = new THREE.Mesh(geos[count % geos.length], mat)
 
-  // Usar exactamente las coordenadas del mundo devueltas por hitTest
-  mesh.position.set(currentHit.x, currentHit.y, currentHit.z)
-  mesh.position.y += 0.06   // Elevar medio objeto para que pose sobre la superficie
+  // Posición: X y Z del raycast, Y=0 (el suelo) + medio objeto
+  mesh.position.set(hit.x, 0.06, hit.z)
   mesh.userData.rotSpeed = 0.4 + Math.random() * 0.6
 
   scene.add(mesh)
   placed.push(mesh)
   count++
-  setStatus(`Objeto #${count} anclado`)
+  setStatus(`Objeto #${count} anclado en el suelo`)
 }
 
 function clearObjects() {
   placed.forEach(m => scene && scene.remove(m))
-  placed.length = 0
-  count = 0
+  placed.length = 0; count = 0
   setStatus('Escena limpia')
 }
 
-// ─── Pipeline de XR8 ───────────────────────────────────────────────────────
+// ─── Pipeline XR8 ──────────────────────────────────────────────────────────
 const onxrloaded = () => {
   XR8.addCameraPipelineModules([
     XR8.GlTextureRenderer.pipelineModule(),
@@ -202,7 +148,6 @@ const onxrloaded = () => {
     XR8.XrController.pipelineModule(),
     {
       name: 'slam-app',
-
       onStart() {
         const s = XR8.Threejs.xrScene()
         scene  = s.scene
@@ -213,33 +158,37 @@ const onxrloaded = () => {
           facing: camera.quaternion,
         })
 
+        // Iluminación
         scene.add(new THREE.AmbientLight(0xffffff, 0.8))
         const dir = new THREE.DirectionalLight(0xffffff, 0.9)
         dir.position.set(1, 3, 2)
         scene.add(dir)
 
-        createReticle()
-        worldMapReady = true   // hitTest disponible desde que XR8 empieza a trackear
+        // Plano del suelo en Y=0 — 100x100m, transparente
+        // Este es el ancla estable. XR8 mueve la CÁMARA, no este plano.
+        surface = new THREE.Mesh(
+          new THREE.PlaneGeometry(100, 100, 1, 1),
+          new THREE.MeshBasicMaterial({ visible: false })
+        )
+        surface.rotateX(-Math.PI / 2)
+        surface.position.set(0, 0, 0)
+        scene.add(surface)
+
+        // Reticle (cursor en el suelo)
+        const rGeo = new THREE.RingGeometry(0.08, 0.11, 32)
+        rGeo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2))
+        reticle = new THREE.Mesh(rGeo, new THREE.MeshBasicMaterial({
+          color: 0x00e5ff, side: THREE.DoubleSide, transparent: true, opacity: 0.9,
+        }))
+        reticle.visible = false
+        scene.add(reticle)
+
         showUI()
-        setStatus('Mueve el teléfono para mapear el suelo…')
+        setStatus('Toca el suelo para colocar objetos')
       },
 
-      onUpdate({ processCpuResult }) {
-        frameCount++
-
-        // Estado de tracking (NORMAL / LIMITED / UNKNOWN)
-        const tStatus = processCpuResult?.reality?.trackingStatus ?? 'UNKNOWN'
-
-        // Debug cada 90 frames
-        if (frameCount % 90 === 0) {
-          const hits  = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE', 'FEATURE_POINT'])
-          const hType = hits?.[0]?.type ?? 'none'
-          setStatus(`tracking:${tStatus} hits:${hits?.length ?? 0} type:${hType}`)
-        }
-
+      onUpdate() {
         updateReticle()
-
-        // Animar objetos colocados
         placed.forEach(m => { m.rotation.y += 0.008 * m.userData.rotSpeed })
       },
     }
@@ -248,27 +197,21 @@ const onxrloaded = () => {
   XR8.XrController.configure({ disableWorldTracking: false })
   XR8.run({ canvas, allowedDevices: XR8.XrConfig.device().ANY })
 
-  // Toque en pantalla coloca en donde apunta el reticle
+  // Toque en pantalla → colocar en ese punto del suelo
   canvas.addEventListener('touchstart', (e) => {
     e.preventDefault()
-    placeObject()
+    placeObject(e.touches[0].clientX, e.touches[0].clientY)
   }, { passive: false })
 }
 
 window.XR8 ? onxrloaded() : window.addEventListener('xrloaded', onxrloaded)
 
-btnPlace.addEventListener('click', placeObject)
+document.getElementById('btn-place').addEventListener('click', () =>
+  placeObject(window.innerWidth / 2, window.innerHeight / 2))
 document.getElementById('btn-clear').addEventListener('click', clearObjects)
 document.getElementById('btn-recenter').addEventListener('click', () => {
   XR8.XrController.recenter()
-  worldMapReady = false
-  currentHit    = null
-  if (reticle) reticle.visible = false
-  btnPlace.textContent = 'Apuntando…'
-  btnPlace.disabled    = true
-  progressWrap.style.display = 'block'
-  progressBar.style.width = '0%'
-  setStatus('Recentrado — mueve el teléfono para remapear')
+  setStatus('Recentrado — el suelo ahora es Y=0 aquí')
 })
 
 window.onerror = (msg, src, line) => setStatus(`ERR: ${msg} L${line}`)
