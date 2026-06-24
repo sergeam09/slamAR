@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
+  <title>SLAM AR</title>
+  <!-- Three.js ANTES que XR8 -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.min.js"></script>
+  <!-- Copyright Niantic Spatial — binary-only license, commercial use permitted -->
+  <script src="https://cdn.jsdelivr.net/npm/@8thwall/engine-binary@1/dist/xr.js"
+          crossorigin="anonymous"
+          data-preload-chunks="slam"></script>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { width:100vw; height:100vh; overflow:hidden; background:#000; font-family:sans-serif; }
+
+    #overlay {
+      position:fixed; inset:0; display:flex; flex-direction:column;
+      align-items:center; justify-content:center;
+      background:#111; color:#fff; z-index:10; gap:14px; transition:opacity 0.5s;
+    }
+    .spinner {
+      width:48px; height:48px; border:4px solid #333; border-top-color:#00e5ff;
+      border-radius:50%; animation:spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    #overlay p { font-size:13px; color:#aaa; text-align:center; max-width:260px; line-height:1.6; }
+
+    #status {
+      position:fixed; top:20px; left:50%; transform:translateX(-50%);
+      background:rgba(0,0,0,0.6); color:#fff; font-size:13px;
+      padding:8px 18px; border-radius:20px; z-index:20;
+      pointer-events:none; transition:opacity 0.4s;
+    }
+
+    #ui {
+      position:fixed; bottom:36px; left:50%; transform:translateX(-50%);
+      display:none; gap:10px; z-index:20;
+    }
+    .btn {
+      padding:13px 20px; border-radius:50px; border:none;
+      cursor:pointer; font-size:14px; font-weight:bold;
+      backdrop-filter:blur(8px); transition:transform 0.1s;
+    }
+    .btn:active { transform:scale(0.93); }
+    #btn-place    { background:rgba(0,229,255,0.9); color:#000; }
+    #btn-clear    { background:rgba(255,60,60,0.8); color:#fff; }
+    #btn-recenter { background:rgba(255,255,255,0.2); color:#fff; border:1px solid rgba(255,255,255,0.3); }
+  </style>
+</head>
+<body>
+
+<div id="overlay">
+  <div class="spinner"></div>
+  <strong>Iniciando SLAM…</strong>
+  <p>Mueve el teléfono lentamente apuntando al suelo para calibrar.</p>
+</div>
+
+<div id="status">Cargando…</div>
+
+<div id="ui">
+  <button class="btn" id="btn-recenter">↺ Recentrar</button>
+  <button class="btn" id="btn-place">＋ Colocar</button>
+  <button class="btn" id="btn-clear">✕ Borrar</button>
+</div>
+
+<canvas id="canvas"></canvas>
+
+<script>
+const overlay  = document.getElementById('overlay')
+const statusEl = document.getElementById('status')
+const ui       = document.getElementById('ui')
+const canvas   = document.getElementById('canvas')
+
+let scene, camera, count = 0
+const placed = []
+const COLORS = [0x00e5ff, 0xff6b6b, 0xffd93d, 0x6bcb77, 0xc77dff, 0xff9f43]
+
+function setStatus(msg, fade) {
+  statusEl.textContent = msg
+  statusEl.style.opacity = '1'
+  if (fade) setTimeout(() => { statusEl.style.opacity = '0' }, fade)
+}
+
+function showUI() {
+  overlay.style.opacity = '0'
+  setTimeout(() => { overlay.style.display = 'none' }, 500)
+  ui.style.display = 'flex'
+  setStatus('¡Listo! Toca Colocar para anclar un objeto', 3000)
+}
+
+function placeObject() {
+  if (!scene || !camera) { setStatus('Espera, calibrando…', 1500); return }
+
+  const geos = [
+    new THREE.BoxGeometry(0.2, 0.2, 0.2),
+    new THREE.SphereGeometry(0.13, 16, 16),
+    new THREE.CylinderGeometry(0.08, 0.08, 0.24, 16),
+    new THREE.ConeGeometry(0.13, 0.26, 16),
+    new THREE.TorusGeometry(0.1, 0.04, 12, 24),
+  ]
+  const geo = geos[count % geos.length]
+  const mat = new THREE.MeshStandardMaterial({ color: COLORS[count % COLORS.length] })
+  const mesh = new THREE.Mesh(geo, mat)
+
+  // Calcular posición frente a la cámara en el plano del suelo
+  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion)
+  forward.y = 0
+  forward.normalize().multiplyScalar(1.5)
+
+  mesh.position.set(
+    camera.position.x + forward.x,
+    0.1,
+    camera.position.z + forward.z
+  )
+  mesh.userData.rotSpeed = 0.5 + Math.random() * 0.8
+
+  scene.add(mesh)
+  placed.push(mesh)
+  count++
+  setStatus(`Objeto #${count} colocado`, 2000)
+}
+
+function clearObjects() {
+  placed.forEach(m => scene.remove(m))
+  placed.length = 0
+  count = 0
+  setStatus('Escena limpia', 2000)
+}
+
+// XR8 con Threejs pipeline module (maneja cámara + render loop)
+window.addEventListener('xrloaded', () => {
+  setStatus('XR8 listo, iniciando…')
+
+  XR8.addCameraPipelineModules([
+    XR8.GlTextureRenderer.pipelineModule(),  // feed de cámara en canvas
+    XR8.Threejs.pipelineModule(),             // integra Three.js con XR8
+    XR8.XrController.pipelineModule(),        // SLAM world tracking
+    {
+      name: 'slam-app',
+      onStart() {
+        // XR8.Threejs.xrScene() devuelve la escena/cámara/renderer que XR8 controla
+        const s = XR8.Threejs.xrScene()
+        scene  = s.scene
+        camera = s.camera
+
+        // Luces
+        scene.add(new THREE.AmbientLight(0xffffff, 0.8))
+        const dir = new THREE.DirectionalLight(0xffffff, 0.6)
+        dir.position.set(2, 4, 2)
+        scene.add(dir)
+
+        showUI()
+      },
+      onUpdate() {
+        // Rotar objetos colocados — XR8.Threejs ya llama renderer.render()
+        placed.forEach(m => { m.rotation.y += 0.01 * m.userData.rotSpeed })
+      },
+    }
+  ])
+
+  XR8.XrController.configure({ disableWorldTracking: false })
+  XR8.run({ canvas })
+})
+
+// Botones
+document.getElementById('btn-place').addEventListener('click', (e) => { e.stopPropagation(); placeObject() })
+document.getElementById('btn-clear').addEventListener('click', (e) => { e.stopPropagation(); clearObjects() })
+document.getElementById('btn-recenter').addEventListener('click', (e) => {
+  e.stopPropagation()
+  if (window.XR8) XR8.XrController.recenter()
+  setStatus('Recentrado', 2000)
+})
+
+// Tap en canvas
+canvas.addEventListener('click', placeObject)
+
+// Errores globales visibles en pantalla
+window.onerror = (msg, src, line) => setStatus(`ERR: ${msg} (L${line})`)
+window.addEventListener('unhandledrejection', e => setStatus(`ERR: ${e.reason}`))
+</script>
+</body>
+</html>
