@@ -214,17 +214,19 @@ const onxrloaded = () => {
       onUpdate({ processCpuResult }) {
         frameCount++
 
-        // Debug cada 60 frames: mostrar qué devuelve el hitTest y el estado de reality
-        if (frameCount % 60 === 0) {
+        // Debug cada 90 frames (~3s)
+        if (frameCount % 90 === 0) {
           const reality = processCpuResult?.reality
-          const hits = worldMapReady
-            ? XR8.XrController.hitTest(0.5, 0.5, ['FEATURE_POINT', 'ESTIMATED_SURFACE'])
-            : null
-          const pos = reality?.position
+          const hits = XR8.XrController.hitTest(0.5, 0.5, ['FEATURE_POINT', 'ESTIMATED_SURFACE'])
+          const pos   = reality?.position
+          const hType = hits?.[0]?.type ?? 'none'
+          // Volcar claves de reality para encontrar métrica de calidad
+          const rKeys = reality ? Object.keys(reality).join(',') : 'null'
           setStatus(
             `f:${frameCount} ` +
-            `pos:${pos ? `${pos.x.toFixed(2)},${pos.y.toFixed(2)},${pos.z.toFixed(2)}` : 'none'} ` +
-            `hits:${hits ? hits.length : 'n/a'}`
+            `pos:${pos ? `${pos.y.toFixed(2)}` : 'no'} ` +
+            `hits:${hits?.length ?? 0} type:${hType} ` +
+            `keys:${rKeys}`
           )
         }
 
