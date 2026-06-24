@@ -124,25 +124,38 @@ function createReticle() {
 function updateReticle() {
   if (!worldMapReady) return
 
-  // 0.5, 0.5 = centro exacto de la pantalla (normalizado 0–1)
-  const hits = XR8.XrController.hitTest(0.5, 0.5, ['FEATURE_POINT', 'ESTIMATED_SURFACE'])
+  // Pedir primero planos (más estables), luego puntos como fallback visual
+  const hitsAll      = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE', 'FEATURE_POINT'])
+  const hitsSurface  = hitsAll?.filter(h => h.type === 'ESTIMATED_SURFACE') ?? []
+  const hitsAny      = hitsAll ?? []
 
-  if (hits && hits.length > 0) {
-    const h = hits[0]
-    const p = h.position
-    const q = h.rotation  // quaternion de la normal de la superficie
+  // Para el reticle usamos cualquier hit (visual feedback)
+  const displayHit = hitsSurface[0] ?? hitsAny[0] ?? null
 
+  if (displayHit) {
+    const p = displayHit.position
+    const q = displayHit.rotation
     reticle.position.set(p.x, p.y, p.z)
     if (q) reticle.quaternion.set(q.x, q.y, q.z, q.w)
-    reticle.visible = true
 
+    // Color: cian si es plano estable, naranja si solo FEATURE_POINT
+    reticle.material.color.setHex(hitsSurface.length > 0 ? 0x00e5ff : 0xff9f43)
+    reticle.visible = true
+  } else {
+    reticle.visible = false
+  }
+
+  // Solo permitir colocar si tenemos un plano detectado (ESTIMATED_SURFACE)
+  if (hitsSurface.length > 0) {
+    const h = hitsSurface[0]
+    const p = h.position
+    const q = h.rotation
     currentHit = { x: p.x, y: p.y, z: p.z, qx: q?.x||0, qy: q?.y||0, qz: q?.z||0, qw: q?.w||1 }
     btnPlace.textContent = '＋ Colocar'
     btnPlace.disabled    = false
   } else {
-    reticle.visible   = false
-    currentHit        = null
-    btnPlace.textContent = 'Apuntando…'
+    currentHit           = null
+    btnPlace.textContent = hitsAny.length > 0 ? 'Sigue escaneando…' : 'Apuntando…'
     btnPlace.disabled    = true
   }
 }
@@ -214,20 +227,14 @@ const onxrloaded = () => {
       onUpdate({ processCpuResult }) {
         frameCount++
 
-        // Debug cada 90 frames (~3s)
+        // Estado de tracking (NORMAL / LIMITED / UNKNOWN)
+        const tStatus = processCpuResult?.reality?.trackingStatus ?? 'UNKNOWN'
+
+        // Debug cada 90 frames
         if (frameCount % 90 === 0) {
-          const reality = processCpuResult?.reality
-          const hits = XR8.XrController.hitTest(0.5, 0.5, ['FEATURE_POINT', 'ESTIMATED_SURFACE'])
-          const pos   = reality?.position
+          const hits  = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE', 'FEATURE_POINT'])
           const hType = hits?.[0]?.type ?? 'none'
-          // Volcar claves de reality para encontrar métrica de calidad
-          const rKeys = reality ? Object.keys(reality).join(',') : 'null'
-          setStatus(
-            `f:${frameCount} ` +
-            `pos:${pos ? `${pos.y.toFixed(2)}` : 'no'} ` +
-            `hits:${hits?.length ?? 0} type:${hType} ` +
-            `keys:${rKeys}`
-          )
+          setStatus(`tracking:${tStatus} hits:${hits?.length ?? 0} type:${hType}`)
         }
 
         updateReticle()
