@@ -12,12 +12,13 @@
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     html, body { width:100%; height:100%; overflow:hidden; background:#000; font-family:sans-serif; }
-    #status {
-      position:fixed; top:20px; left:50%; transform:translateX(-50%);
-      background:rgba(0,0,0,0.6); color:#fff; font-size:13px;
-      padding:8px 18px; border-radius:20px; z-index:20;
-      pointer-events:none; transition:opacity 0.4s; white-space:nowrap;
+
+    #camerafeed {
+      position:fixed; top:0; left:0;
+      width:100% !important; height:100% !important;
+      display:block; z-index:0;
     }
+
     #overlay {
       position:fixed; inset:0; display:flex; flex-direction:column;
       align-items:center; justify-content:center;
@@ -29,48 +30,59 @@
     }
     @keyframes spin { to { transform:rotate(360deg); } }
     #overlay p { font-size:13px; color:#aaa; text-align:center; max-width:260px; line-height:1.6; }
+
+    #status {
+      position:fixed; top:20px; left:50%; transform:translateX(-50%);
+      background:rgba(0,0,0,0.6); color:#fff; font-size:13px;
+      padding:8px 18px; border-radius:20px; z-index:20;
+      pointer-events:none; transition:opacity 0.4s; white-space:nowrap;
+    }
+
+    #crosshair {
+      position:fixed; top:50%; left:50%;
+      transform:translate(-50%,-50%);
+      width:44px; height:44px; z-index:20; pointer-events:none; display:none;
+    }
+    #crosshair::before, #crosshair::after {
+      content:''; position:absolute; border-radius:2px;
+      background:rgba(255,255,255,0.85);
+    }
+    #crosshair::before { width:2px; height:100%; left:50%; transform:translateX(-50%); }
+    #crosshair::after  { width:100%; height:2px; top:50%; transform:translateY(-50%); }
+
     #ui {
       position:fixed; bottom:36px; left:50%; transform:translateX(-50%);
       display:none; gap:10px; z-index:20;
     }
     .btn {
-      padding:13px 20px; border-radius:50px; border:none;
+      padding:13px 22px; border-radius:50px; border:none;
       cursor:pointer; font-size:14px; font-weight:bold;
-      backdrop-filter:blur(8px); transition:transform 0.1s;
+      backdrop-filter:blur(10px); transition:transform 0.1s;
     }
     .btn:active { transform:scale(0.93); }
     #btn-place    { background:rgba(0,229,255,0.9); color:#000; }
     #btn-clear    { background:rgba(255,60,60,0.8); color:#fff; }
     #btn-recenter { background:rgba(255,255,255,0.2); color:#fff; border:1px solid rgba(255,255,255,0.3); }
-
-    /* Crosshair central para apuntar */
-    #crosshair {
-      position:fixed; top:50%; left:50%;
-      transform:translate(-50%,-50%);
-      width:40px; height:40px; z-index:20; pointer-events:none;
-    }
-    #crosshair::before, #crosshair::after {
-      content:''; position:absolute; background:rgba(255,255,255,0.8); border-radius:2px;
-    }
-    #crosshair::before { width:2px; height:100%; left:50%; transform:translateX(-50%); }
-    #crosshair::after  { width:100%; height:2px; top:50%; transform:translateY(-50%); }
   </style>
 </head>
 <body>
 
+<!-- Canvas en el HTML con ID fijo — XR8 lo busca por ID -->
+<canvas id="camerafeed"></canvas>
+
 <div id="overlay">
   <div class="spinner"></div>
-  <strong>Calibrando espacio…</strong>
-  <p>Apunta al suelo y mueve el teléfono lentamente para que el SLAM detecte la superficie.</p>
+  <strong>Calibrando SLAM…</strong>
+  <p>Apunta la cámara al suelo y mueve el teléfono lentamente.</p>
 </div>
 
 <div id="status">Cargando…</div>
-<div id="crosshair" style="display:none"></div>
+<div id="crosshair"></div>
 
 <div id="ui">
   <button class="btn" id="btn-recenter">↺ Recentrar</button>
-  <button class="btn" id="btn-place">＋ Colocar</button>
-  <button class="btn" id="btn-clear">✕ Borrar</button>
+  <button class="btn" id="btn-place">＋ Colocar aquí</button>
+  <button class="btn" id="btn-clear">✕ Borrar todo</button>
 </div>
 
 <script>
@@ -78,12 +90,20 @@ const overlay   = document.getElementById('overlay')
 const statusEl  = document.getElementById('status')
 const ui        = document.getElementById('ui')
 const crosshair = document.getElementById('crosshair')
+const canvas    = document.getElementById('camerafeed')
+
+// ── Tamaño real del canvas ANTES de que XR8 lo use ──────────────────────
+function resizeCanvas() {
+  canvas.width  = window.innerWidth
+  canvas.height = window.innerHeight
+}
+resizeCanvas()
+window.addEventListener('resize', resizeCanvas)
 
 let xrScene, xrCamera
-let floorY = null        // Y del suelo detectado por SLAM
 let count = 0
 const anchors = []
-const COLORS = [0x00e5ff, 0xff6b6b, 0xffd93d, 0x6bcb77, 0xc77dff, 0xff9f43]
+const COLORS  = [0x00e5ff, 0xff6b6b, 0xffd93d, 0x6bcb77, 0xc77dff, 0xff9f43]
 
 function setStatus(msg, fade) {
   statusEl.textContent = msg
@@ -94,115 +114,88 @@ function setStatus(msg, fade) {
 function showUI() {
   overlay.style.opacity = '0'
   setTimeout(() => { overlay.style.display = 'none' }, 500)
-  ui.style.display = 'flex'
+  ui.style.display        = 'flex'
   crosshair.style.display = 'block'
-  setStatus('Apunta al suelo — el SLAM calibra la superficie', 0)
+  setStatus('Apunta al suelo y toca "Colocar aquí"', 4000)
 }
 
-function placeObject() {
-  if (!xrScene || !xrCamera) { setStatus('Calibrando aún…', 1500); return }
+function placeObject(clientX, clientY) {
+  if (!xrScene || !xrCamera) { setStatus('Calibrando…', 1500); return }
 
-  const camPos  = new THREE.Vector3()
-  const camQuat = new THREE.Quaternion()
-  xrCamera.getWorldPosition(camPos)
-  xrCamera.getWorldQuaternion(camQuat)
+  const x = clientX / window.innerWidth
+  const y = clientY / window.innerHeight
 
-  // Vector hacia adelante proyectado al plano horizontal
-  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camQuat)
-  forward.y = 0
-  forward.normalize().multiplyScalar(1.2)
+  const hits = XR8.XrController.hitTest(x, y, ['FEATURE_POINT', 'ESTIMATED_SURFACE'])
 
-  // Usar Y real del suelo si ya fue detectado, sino estimar
-  const groundY = floorY !== null ? floorY + 0.1 : camPos.y - 0.6
+  let worldPos
+  if (hits && hits.length > 0) {
+    const best = hits.find(h => h.type === 'ESTIMATED_SURFACE') || hits[0]
+    worldPos = new THREE.Vector3(best.position.x, best.position.y, best.position.z)
+  } else {
+    // Fallback al plano Y=0
+    const camPos  = new THREE.Vector3()
+    const camQuat = new THREE.Quaternion()
+    xrCamera.getWorldPosition(camPos)
+    xrCamera.getWorldQuaternion(camQuat)
+    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camQuat)
+    fwd.y = 0; fwd.normalize().multiplyScalar(1.2)
+    worldPos = new THREE.Vector3(camPos.x + fwd.x, 0, camPos.z + fwd.z)
+    setStatus('Sin superficie — estimando', 2000)
+  }
 
-  const worldPos = new THREE.Vector3(
-    camPos.x + forward.x,
-    groundY,
-    camPos.z + forward.z
-  )
-
-  // Anchor congelado en el mundo
   const anchor = new THREE.Object3D()
   anchor.position.copy(worldPos)
   anchor.matrixAutoUpdate = false
   anchor.updateMatrix()
-  xrScene.add(anchor)
 
   const geos = [
-    new THREE.BoxGeometry(0.2, 0.2, 0.2),
-    new THREE.SphereGeometry(0.13, 16, 16),
-    new THREE.CylinderGeometry(0.08, 0.08, 0.24, 16),
-    new THREE.ConeGeometry(0.13, 0.26, 16),
-    new THREE.TorusGeometry(0.1, 0.04, 12, 24),
+    new THREE.BoxGeometry(0.15, 0.15, 0.15),
+    new THREE.SphereGeometry(0.1, 16, 16),
+    new THREE.CylinderGeometry(0.06, 0.06, 0.18, 16),
+    new THREE.ConeGeometry(0.1, 0.2, 16),
+    new THREE.TorusGeometry(0.08, 0.03, 12, 24),
   ]
-  const geo = geos[count % geos.length]
   const mat = new THREE.MeshStandardMaterial({
-    color: COLORS[count % COLORS.length],
-    roughness: 0.4, metalness: 0.1,
+    color: COLORS[count % COLORS.length], roughness: 0.3, metalness: 0.2,
   })
-  const mesh = new THREE.Mesh(geo, mat)
+  const mesh = new THREE.Mesh(geos[count % geos.length], mat)
   mesh.userData.rotSpeed = 0.4 + Math.random() * 0.6
   anchor.add(mesh)
 
+  xrScene.add(anchor)
   anchors.push(anchor)
   count++
-  setStatus(`Objeto #${count} anclado en suelo`, 2000)
+
+  if (hits && hits.length > 0) {
+    setStatus(`Objeto #${count} anclado en superficie`, 2500)
+  }
 }
 
 function clearObjects() {
   anchors.forEach(a => xrScene && xrScene.remove(a))
-  anchors.length = 0
-  count = 0
-  floorY = null
+  anchors.length = 0; count = 0
   setStatus('Escena limpia', 2000)
 }
 
-window.addEventListener('xrloaded', () => {
-  setStatus('XR8 listo…')
-
-  const canvas = document.createElement('canvas')
-  canvas.width  = window.innerWidth  * window.devicePixelRatio
-  canvas.height = window.innerHeight * window.devicePixelRatio
-  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;display:block;z-index:0;'
-  document.body.appendChild(canvas)
-  canvas.addEventListener('click', placeObject)
-
+// ── XR8 ─────────────────────────────────────────────────────────────────
+const onxrloaded = () => {
   XR8.addCameraPipelineModules([
     XR8.GlTextureRenderer.pipelineModule(),
     XR8.Threejs.pipelineModule(),
     XR8.XrController.pipelineModule(),
     {
       name: 'slam-app',
-
       onStart() {
-        const s = XR8.Threejs.xrScene()
-        xrScene  = s.scene
-        xrCamera = s.camera
-
+        const { scene, camera } = XR8.Threejs.xrScene()
+        xrScene  = scene
+        xrCamera = camera
         xrScene.add(new THREE.AmbientLight(0xffffff, 0.7))
         const dir = new THREE.DirectionalLight(0xffffff, 0.8)
         dir.position.set(1, 3, 2)
         xrScene.add(dir)
-
         showUI()
       },
-
-      onUpdate({ processCpuResult }) {
-        // Extraer Y del suelo desde el resultado del SLAM
-        if (processCpuResult?.reality) {
-          const { floorHeight } = processCpuResult.reality
-          if (floorHeight !== undefined && floorHeight !== null) {
-            if (floorY === null) {
-              floorY = floorHeight
-              setStatus('Suelo detectado — toca Colocar', 3000)
-            } else {
-              // Suavizar con promedio móvil para evitar saltos
-              floorY = floorY * 0.95 + floorHeight * 0.05
-            }
-          }
-        }
-
-        // Rotar meshes hijos de cada anchor
+      onUpdate() {
         anchors.forEach(a => {
           if (a.children[0]) a.children[0].rotation.y += 0.008 * a.children[0].userData.rotSpeed
         })
@@ -211,21 +204,22 @@ window.addEventListener('xrloaded', () => {
   ])
 
   XR8.XrController.configure({ disableWorldTracking: false })
-  XR8.run({ canvas })
+  XR8.run({ canvas, allowedDevices: XR8.XrConfig.device().ANY })
 
-  window.addEventListener('resize', () => {
-    canvas.width  = window.innerWidth  * window.devicePixelRatio
-    canvas.height = window.innerHeight * window.devicePixelRatio
-  })
-})
+  canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault()
+    placeObject(e.touches[0].clientX, e.touches[0].clientY)
+  }, { passive: false })
+}
 
-document.getElementById('btn-place').addEventListener('click',    e => { e.stopPropagation(); placeObject() })
-document.getElementById('btn-clear').addEventListener('click',    e => { e.stopPropagation(); clearObjects() })
-document.getElementById('btn-recenter').addEventListener('click', e => {
-  e.stopPropagation()
+window.XR8 ? onxrloaded() : window.addEventListener('xrloaded', onxrloaded)
+
+document.getElementById('btn-place').addEventListener('click', () =>
+  placeObject(window.innerWidth / 2, window.innerHeight / 2))
+document.getElementById('btn-clear').addEventListener('click', clearObjects)
+document.getElementById('btn-recenter').addEventListener('click', () => {
   XR8.XrController.recenter()
-  floorY = null
-  setStatus('Recentrado — vuelve a apuntar al suelo', 2000)
+  setStatus('Recentrado', 2000)
 })
 
 window.onerror = (msg, src, line) => setStatus(`ERR: ${msg} L${line}`)
